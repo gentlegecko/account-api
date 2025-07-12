@@ -1,15 +1,12 @@
-from fastapi import FastAPI, HTTPException, Path, Request
-from pydantic import BaseModel, Field
-from typing import Optional
+from fastapi import FastAPI, HTTPException, Request, Path, Body
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from typing import Optional, Dict
 import base64
-import re
 
 app = FastAPI()
+users_db: Dict[str, Dict] = {}
 
-users_db = {}
-
-# Models
 class SignupRequest(BaseModel):
     user_id: str = Field(..., min_length=6, max_length=20, pattern="^[a-zA-Z0-9]+$")
     password: str = Field(..., min_length=8, max_length=20)
@@ -17,95 +14,94 @@ class SignupRequest(BaseModel):
 class UserResponse(BaseModel):
     user_id: str
     nickname: str
+    comment: Optional[str] = None
 
 class MessageResponse(BaseModel):
     message: str
     user: Optional[UserResponse] = None
     cause: Optional[str] = None
 
-# POST /signup
+
+def get_auth_user(request: Request) -> Optional[Dict]:
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.startswith("Basic "):
+        return None
+    try:
+        decoded = base64.b64decode(auth[6:]).decode()
+        user_id, password = decoded.split(":", 1)
+        user = users_db.get(user_id)
+        if user and user["password"] == password:
+            return {"user_id": user_id, "user": user}
+    except Exception:
+        pass
+    return None
+
+
 @app.post("/signup", response_model=MessageResponse)
-def signup(request: SignupRequest):
-    user_id = request.user_id
-    password = request.password
-
-    # Check if user already exists
-    if user_id in users_db:
-        raise HTTPException(status_code=400, detail={"message": "account creation failed", "cause": "user_id already exists"})
-
-    # Save user
-    users_db[user_id] = {
-        "user_id": user_id,
-        "password": password,
-        "nickname": user_id  # default nickname same as user_id
-    }
-
+def signup(req: SignupRequest):
+    if req.user_id in users_db:
+        raise HTTPException(400, detail={"message": "Account creation failed", "cause": "required user_id and password"})
+    users_db[req.user_id] = {"user_id": req.user_id, "password": req.password, "nickname": req.user_id}
     return {
-        "message": "account created",
-        "user": {
-            "user_id": user_id,
-            "nickname": user_id
-        }
+        "message": "Account successfully created",
+        "user": {"user_id": req.user_id, "nickname": req.user_id}
     }
-
 
 @app.get("/users/{user_id}", response_model=MessageResponse)
 def get_user(user_id: str, request: Request):
-    auth_header = request.headers.get("Authorization")
-
-    if not auth_header or not auth_header.startswith("Basic "):
-        return JSONResponse(status_code=401, content={"message": "authentication failed"})
-
-    # Decode Basic Auth
-    try:
-        encoded_credentials = auth_header.split(" ")[1]
-        decoded_bytes = base64.b64decode(encoded_credentials).decode("utf-8")
-        auth_user_id, auth_password = decoded_bytes.split(":", 1)
-    except Exception:
-        return JSONResponse(status_code=401, content={"message": "authentication failed"})
-
-    # Verify credentials
-    user = users_db.get(user_id)
-    if not user:
-        return JSONResponse(status_code=404, content={"message": "no user found"})
-
-    if user_id != auth_user_id or user["password"] != auth_password:
-        return JSONResponse(status_code=401, content={"message": "authentication failed"})
-
-    # Prepare user data
-    nickname = user.get("nickname") or user["user_id"]
-    comment = user.get("comment")
-
-    user_response = {
+    auth = get_auth_user(request)
+    if not auth:
+        return JSONResponse(status_code=401, content={"message": "Authentication failed"})
+    if user_id not in users_db:
+        return JSONResponse(status_code=404, content={"message": "No user found"})
+    
+    user = users_db[user_id]
+    user_data = {
         "user_id": user["user_id"],
-        "nickname": nickname
+        "nickname": user.get("nickname", user_id)
     }
+    if "comment" in user:
+        user_data["comment"] = user["comment"]
+    return {"message": "User details by user_id", "user": user_data}
 
-    if comment:
-        user_response["comment"] = comment
+@app.patch("/users/{user_id}")
+def update_user(user_id: str, request: Request, body: dict = Body(...)):
+    auth = get_auth_user(request)
+    if not auth:
+        return JSONResponse(status_code=401, content={"message": "Authentication failed"})
+    if user_id not in users_db:
+        return JSONResponse(status_code=404, content={"message": "No user found"})
+    if auth["user_id"] != user_id:
+        return JSONResponse(status_code=403, content={"message": "No Permission for update"})
+
+    if "user_id" in body or "password" in body:
+        return JSONResponse(status_code=400, content={"message": "User updation failed", "cause": "not updatable user_id and password"})
+    if "nickname" not in body and "comment" not in body:
+        return JSONResponse(status_code=400, content={"message": "User updation failed", "cause": "required nickname or comment"})
+
+    user = users_db[user_id]
+    if "nickname" in body:
+        nickname = body["nickname"]
+        user["nickname"] = user_id if nickname == "" else nickname[:30]
+    if "comment" in body:
+        comment = body["comment"]
+        if comment == "":
+            user.pop("comment", None)
+        else:
+            user["comment"] = comment[:100]
 
     return {
-        "message": "user details by user_id",
-        "user": user_response
+        "message": "User successfully updated",
+        "recipe": [{
+            "nickname": user.get("nickname", user_id),
+            "comment": user.get("comment", "")
+        }]
     }
 
-
-# PATCH /users/{user_id}
-@app.patch("/users/{user_id}", response_model=UserResponse)
-def update_user(user_id: str, data: dict):
-    user = users_db.get(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="user not found")
-
-    if "nickname" in data:
-        user["nickname"] = data["nickname"]
-
-    return {
-        "user_id": user["user_id"],
-        "nickname": user["nickname"]
-    }
-
-# POST /close
-@app.post("/close", response_model=MessageResponse)
-def close():
-    return { "message": "server shutting down (not really, this is a stub)" }
+@app.post("/close")
+def close_account(request: Request):
+    auth = get_auth_user(request)
+    if not auth:
+        return JSONResponse(status_code=401, content={"message": "Authentication failed"})
+    del users_db[auth["user_id"]]
+    return {"message": "Account and user successfully removed"}
