@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request, Path, Body
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
 from typing import Optional, Dict
 import base64
@@ -21,6 +22,16 @@ class MessageResponse(BaseModel):
     user: Optional[UserResponse] = None
     cause: Optional[str] = None
 
+# --- Custom Exception Handler for Validation Errors ---
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=400,
+        content={
+            "message": "Account creation failed",
+            "cause": "required user_id and password"
+        },
+    )
 
 def get_auth_user(request: Request) -> Optional[Dict]:
     auth = request.headers.get("Authorization")
@@ -36,25 +47,30 @@ def get_auth_user(request: Request) -> Optional[Dict]:
         pass
     return None
 
-
 @app.post("/signup", response_model=MessageResponse)
 def signup(req: SignupRequest):
     if req.user_id in users_db:
         raise HTTPException(400, detail={"message": "Account creation failed", "cause": "required user_id and password"})
-    users_db[req.user_id] = {"user_id": req.user_id, "password": req.password, "nickname": req.user_id}
+    users_db[req.user_id] = {
+        "user_id": req.user_id,
+        "password": req.password,
+        "nickname": req.user_id
+    }
     return {
         "message": "Account successfully created",
-        "user": {"user_id": req.user_id, "nickname": req.user_id}
+        "user": {
+            "user_id": req.user_id,
+            "nickname": req.user_id
+        }
     }
 
 @app.get("/users/{user_id}", response_model=MessageResponse)
 def get_user(user_id: str, request: Request):
     auth = get_auth_user(request)
     if not auth:
-        return JSONResponse(status_code=401, content={"message": "Authentication failed"})
+        return JSONResponse(status_code=401, content={"message": "Authentication Failed"})
     if user_id not in users_db:
         return JSONResponse(status_code=404, content={"message": "No user found"})
-    
     user = users_db[user_id]
     user_data = {
         "user_id": user["user_id"],
@@ -64,15 +80,15 @@ def get_user(user_id: str, request: Request):
         user_data["comment"] = user["comment"]
     return {"message": "User details by user_id", "user": user_data}
 
-@app.patch("/users/{user_id}")
+@app.patch("/users/{user_id}", response_model=MessageResponse)
 def update_user(user_id: str, request: Request, body: dict = Body(...)):
     auth = get_auth_user(request)
     if not auth:
-        return JSONResponse(status_code=401, content={"message": "Authentication failed"})
+        return JSONResponse(status_code=401, content={"message": "Authentication Failed"})
     if user_id not in users_db:
         return JSONResponse(status_code=404, content={"message": "No user found"})
     if auth["user_id"] != user_id:
-        return JSONResponse(status_code=403, content={"message": "No Permission for update"})
+        return JSONResponse(status_code=403, content={"message": "No Permission for Update"})
 
     if "user_id" in body or "password" in body:
         return JSONResponse(status_code=400, content={"message": "User updation failed", "cause": "not updatable user_id and password"})
@@ -92,16 +108,16 @@ def update_user(user_id: str, request: Request, body: dict = Body(...)):
 
     return {
         "message": "User successfully updated",
-        "recipe": [{
+        "user": {
             "nickname": user.get("nickname", user_id),
             "comment": user.get("comment", "")
-        }]
+        }
     }
 
 @app.post("/close")
 def close_account(request: Request):
     auth = get_auth_user(request)
     if not auth:
-        return JSONResponse(status_code=401, content={"message": "Authentication failed"})
+        return JSONResponse(status_code=401, content={"message": "Authentication Failed"})
     del users_db[auth["user_id"]]
     return {"message": "Account and user successfully removed"}
