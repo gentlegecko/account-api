@@ -1,16 +1,11 @@
-from fastapi import FastAPI, HTTPException, Request, Path, Body
+from fastapi import FastAPI, Request, Body
 from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional, Dict
 import base64
 
 app = FastAPI()
 users_db: Dict[str, Dict] = {}
-
-class SignupRequest(BaseModel):
-    user_id: str = Field(..., min_length=6, max_length=20, pattern="^[a-zA-Z0-9]+$")
-    password: str = Field(..., min_length=8, max_length=20)
 
 class UserResponse(BaseModel):
     user_id: str
@@ -21,17 +16,6 @@ class MessageResponse(BaseModel):
     message: str
     user: Optional[UserResponse] = None
     cause: Optional[str] = None
-
-# --- Custom Exception Handler for Validation Errors ---
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    return JSONResponse(
-        status_code=400,
-        content={
-            "message": "Account creation failed",
-            "cause": "required user_id and password"
-        },
-    )
 
 def get_auth_user(request: Request) -> Optional[Dict]:
     auth = request.headers.get("Authorization")
@@ -47,20 +31,47 @@ def get_auth_user(request: Request) -> Optional[Dict]:
         pass
     return None
 
+def is_valid_user_id(user_id: str) -> bool:
+    return 6 <= len(user_id) <= 20 and user_id.isalnum()
+
+def is_valid_password(password: str) -> bool:
+    return 8 <= len(password) <= 20
+
 @app.post("/signup", response_model=MessageResponse)
-def signup(req: SignupRequest):
-    if req.user_id in users_db:
-        raise HTTPException(400, detail={"message": "Account creation failed", "cause": "required user_id and password"})
-    users_db[req.user_id] = {
-        "user_id": req.user_id,
-        "password": req.password,
-        "nickname": req.user_id
+async def signup(request: Request):
+    body = await request.json()
+    user_id = body.get("user_id")
+    password = body.get("password")
+
+    if not user_id or not password or not is_valid_user_id(user_id) or not is_valid_password(password):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "message": "Account creation failed",
+                "cause": "required user_id and password"
+            }
+        )
+
+    if user_id in users_db:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "message": "Account creation failed",
+                "cause": "required user_id and password"
+            }
+        )
+
+    users_db[user_id] = {
+        "user_id": user_id,
+        "password": password,
+        "nickname": user_id
     }
+
     return {
         "message": "Account successfully created",
         "user": {
-            "user_id": req.user_id,
-            "nickname": req.user_id
+            "user_id": user_id,
+            "nickname": user_id
         }
     }
 
@@ -71,14 +82,18 @@ def get_user(user_id: str, request: Request):
         return JSONResponse(status_code=401, content={"message": "Authentication Failed"})
     if user_id not in users_db:
         return JSONResponse(status_code=404, content={"message": "No user found"})
+
     user = users_db[user_id]
     user_data = {
         "user_id": user["user_id"],
-        "nickname": user.get("nickname", user_id)
+        "nickname": user.get("nickname", user_id),
+        "comment": user.get("comment")  # May be None
     }
-    if "comment" in user:
-        user_data["comment"] = user["comment"]
-    return {"message": "User details by user_id", "user": user_data}
+
+    return {
+        "message": "User details by user_id",
+        "user": user_data
+    }
 
 @app.patch("/users/{user_id}", response_model=MessageResponse)
 def update_user(user_id: str, request: Request, body: dict = Body(...)):
@@ -91,14 +106,27 @@ def update_user(user_id: str, request: Request, body: dict = Body(...)):
         return JSONResponse(status_code=403, content={"message": "No Permission for Update"})
 
     if "user_id" in body or "password" in body:
-        return JSONResponse(status_code=400, content={"message": "User updation failed", "cause": "not updatable user_id and password"})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "message": "User updation failed",
+                "cause": "not updatable user_id and password"
+            }
+        )
     if "nickname" not in body and "comment" not in body:
-        return JSONResponse(status_code=400, content={"message": "User updation failed", "cause": "required nickname or comment"})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "message": "User updation failed",
+                "cause": "required nickname or comment"
+            }
+        )
 
     user = users_db[user_id]
     if "nickname" in body:
         nickname = body["nickname"]
         user["nickname"] = user_id if nickname == "" else nickname[:30]
+
     if "comment" in body:
         comment = body["comment"]
         if comment == "":
@@ -109,15 +137,20 @@ def update_user(user_id: str, request: Request, body: dict = Body(...)):
     return {
         "message": "User successfully updated",
         "user": {
-            "nickname": user.get("nickname", user_id),
-            "comment": user.get("comment", "")
+            "user_id": user["user_id"],
+            "nickname": user["nickname"],
+            "comment": user.get("comment")
         }
     }
 
-@app.post("/close")
+@app.post("/close", response_model=MessageResponse)
 def close_account(request: Request):
     auth = get_auth_user(request)
     if not auth:
         return JSONResponse(status_code=401, content={"message": "Authentication Failed"})
+    
     del users_db[auth["user_id"]]
-    return {"message": "Account and user successfully removed"}
+    
+    return {
+        "message": "Account and user successfully removed"
+    }
