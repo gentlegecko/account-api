@@ -5,6 +5,7 @@ from typing import Optional, Dict
 import base64
 
 app = FastAPI()
+
 users_db: Dict[str, Dict] = {}
 
 class UserResponse(BaseModel):
@@ -100,10 +101,15 @@ def update_user(user_id: str, request: Request, body: dict = Body(...)):
     auth = get_auth_user(request)
     if not auth:
         return JSONResponse(status_code=401, content={"message": "Authentication Failed"})
+
+    if auth["user_id"] != user_id:
+        if user_id in users_db:
+            return JSONResponse(status_code=403, content={"message": "No Permission for Update"})
+        else:
+            return JSONResponse(status_code=404, content={"message": "No user found"})
+
     if user_id not in users_db:
         return JSONResponse(status_code=404, content={"message": "No user found"})
-    if auth["user_id"] != user_id:
-        return JSONResponse(status_code=403, content={"message": "No Permission for Update"})
 
     if "user_id" in body or "password" in body:
         return JSONResponse(
@@ -148,9 +154,9 @@ def close_account(request: Request):
     auth = get_auth_user(request)
     if not auth:
         return JSONResponse(status_code=401, content={"message": "Authentication Failed"})
-    
+
     del users_db[auth["user_id"]]
-    
+
     return {
         "message": "Account and user successfully removed"
     }
